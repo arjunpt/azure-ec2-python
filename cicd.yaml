@@ -1,0 +1,139 @@
+trigger:
+  branches:
+    include:
+      - main  # Trigger on the 'main' branch
+
+pool:
+  vmImage: 'ubuntu-latest'  # Using Ubuntu virtual machine
+
+stages:
+  - stage: lint_test
+    jobs:
+      - job: linting
+        steps:
+        - checkout: self  # Checkout the repository
+
+        - task: UsePythonVersion@0
+          inputs:
+            versionSpec: '3.10'  # Use Python 3.10
+            addToPath: true
+
+        - script: |
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+          displayName: 'Install dependencies'
+
+        - script: |
+            flake8 .  # Run flake8 linting on the entire repository
+          displayName: 'Run flake8 linting'
+
+  - stage: py_test
+    dependsOn: lint_test  # Ensure py_test runs after lint_test
+    jobs:
+      - job: py_test
+        steps:
+        - checkout: self  # Checkout the repository
+
+        - task: UsePythonVersion@0
+          inputs:
+            versionSpec: '3.10'  # Use Python 3.10
+            addToPath: true
+
+        - script: |
+            python -m pip install --upgrade pip
+            pip install pytest pytest-azurepipelines pytest-cov  # Install pytest-cov for coverage
+            pip install -r requirements.txt
+          displayName: 'Install dependencies'
+
+        - script: |
+            export PYTHONPATH=src
+            pytest --cov=src --cov-report=xml --maxfail=1 --disable-warnings -q --junitxml=test-results.xml
+          displayName: 'Run tests with pytest and coverage'
+
+        - task: PublishTestResults@2
+          inputs:
+            testResultsFiles: '**/test-results.xml'
+            testResultsFormat: 'JUnit'
+            mergeTestResults: true
+          condition: succeededOrFailed()
+          displayName: 'Publish Test Results'
+
+        - task: PublishBuildArtifacts@1
+          inputs:
+            PathtoPublish: 'coverage.xml'  # Path to the coverage report file
+            ArtifactName: 'coverage-report'
+            publishLocation: 'Container'
+          displayName: 'Upload Coverage Report'
+
+  - stage: snyk_scan
+    dependsOn: py_test
+    jobs:
+      - job: snyk_scan
+        steps:
+        - checkout: self
+
+        - task: SnykSecurityScan@1
+          inputs:
+            serviceConnectionEndpoint: 'snykToken'
+            testType: 'code'
+            failOnIssues: false
+            monitorWhen: 'always'
+            additionalArguments: '--all-projects --sarif-file-output=src/CodeAnalysisLogs/snyk-open-source.sarif'
+          displayName: 'Run Snyk Security Scan on src folder'
+
+        - script: mkdir -p src/CodeAnalysisLogs
+          displayName: 'Create CodeAnalysisLogs Directory'
+          
+        - task: PublishBuildArtifacts@1
+          displayName: "Publish Artifact: CodeAnalysisLogs"
+          condition: succeededOrFailed()
+          inputs:
+            PathtoPublish: src/CodeAnalysisLogs
+            ArtifactName: CodeAnalysisLogs
+
+  # - stage: sonar_scan
+  #   dependsOn: snyk_scan
+  #   jobs:
+  #     - job: sonar_scan
+  #       steps:
+  #       - checkout: self
+
+  #       - task: SonarQubePrepare@6
+  #         inputs:
+  #           SonarQube: 'sonar-connection'
+  #           scannerMode: 'CLI'
+  #           cliVersion: '6.2.0.4584'
+  #           configMode: 'file'
+            
+  #       - task: SonarQubeAnalyze@6
+  #         inputs:
+  #             jdkversion: 'JAVA_HOME_17_X64'
+  #         displayName: "run sonar scan"
+
+  - stage: deploy
+    # dependsOn: sonar_scan
+    jobs:
+      - job: deploy
+        steps:
+        - checkout: self
+    
+        - task: CopyFilesOverSSH@0
+          inputs:
+            sshEndpoint: 'ssh-dac'
+            sourceFolder: '.'
+            contents: |
+              src/** 
+              deploy.sh 
+              requirements.txt 
+            targetFolder: '/home/ubuntu'
+
+        - task: SSH@0
+          inputs:
+            sshEndpoint: 'ssh-dac'
+            commands: |
+              cd /home/ubuntu
+              ls -l /home/ubuntu
+              sed -i 's/\r//' deploy.sh
+              chmod +x deploy.sh
+              ./deploy.sh
+          
